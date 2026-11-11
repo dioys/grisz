@@ -5,7 +5,7 @@ Nothing here has been run. Each step that can cost money says so. Do not start b
 ## Before deploying
 - [ ] Full test run on the PC: page, access codes, uploads, quizzes, Grafana, Ragas, Langfuse
 - [ ] Redesign + debug pass (owner's rule)
-- [ ] Privacy notice and terms on the site: questions and module text go to Groq (and Langfuse if tracing is on); who runs the site; how to ask for deletion
+- [ ] Privacy notice and terms on the site: questions and module text go to Groq (and Langfuse if tracing is on); **students' names and scores are stored** (`storage/results.db`); who runs the site; how to ask for deletion (teacher uses `DELETE /results/{name}`)
 - [ ] Long, different `TEACHER_CODE` and `STUDENT_CODE`
 - [ ] Only openly licensed or your own PDFs in `data/`
 

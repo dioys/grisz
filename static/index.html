@@ -75,9 +75,36 @@
   <form id="take-form">
     <label for="quiz-id">Quiz id (from your teacher)</label>
     <input id="quiz-id" type="text" required>
+    <label for="student">Your name</label>
+    <input id="student" type="text" required maxlength="60">
+    <small>Your name and score are saved on this server so your teacher can see your progress. Ask your teacher to delete them anytime.</small><br>
     <button>Open quiz</button>
   </form>
   <div id="take-out"></div>
+</section>
+
+<section>
+  <h2>Study plan (student)</h2>
+  <form id="plan-form">
+    <label for="exam">Exam date</label>
+    <input id="exam" type="date" required>
+    <label for="topics">What the exam covers</label>
+    <input id="topics" type="text" required maxlength="300" placeholder="e.g. machine learning, for loops">
+    <button>Make my plan</button>
+  </form>
+  <div id="plan-out" class="out" hidden></div>
+</section>
+
+<section>
+  <h2>Progress report (teacher)</h2>
+  <button id="report-btn" type="button">Show report</button>
+  <div id="report-out" class="out" hidden></div>
+  <form id="delete-form">
+    <label for="del-name">Delete all saved results for a student</label>
+    <input id="del-name" type="text" required maxlength="60">
+    <button>Delete</button>
+  </form>
+  <div id="delete-out" class="out" hidden></div>
 </section>
 
 <script>
@@ -168,13 +195,14 @@ $("copy-id").onclick = async () => {
 $("approve").onclick = () => review(true);
 $("reject").onclick = () => review(false);
 
-// Take a quiz (only approved quizzes come back)
+// Take a quiz: the page only gets the questions; the server checks the answers and saves the score
 $("take-form").onsubmit = async (e) => {
   e.preventDefault();
   const out = $("take-out");
   out.textContent = "Loading…";
   try {
-    const r = await call("/quiz/" + encodeURIComponent($("quiz-id").value.trim()));
+    const id = $("quiz-id").value.trim();
+    const r = await call("/quiz/" + encodeURIComponent(id));
     if (!r.quiz) { out.textContent = `This quiz isn't ready yet (status: ${r.status}).`; return; }
     out.textContent = "";
     const add = (tag, text, parent = out) => {
@@ -183,12 +211,11 @@ $("take-form").onsubmit = async (e) => {
       parent.appendChild(el);
       return el;
     };
-    const checks = [];
+    const getters = [], results = [];
     r.quiz.items.forEach((it, i) => {
       const box = add("fieldset");
       add("legend", `${i + 1}. ${it.q}`, box);
       const options = it.type === "mc" ? it.choices : it.type === "tf" ? ["True", "False"] : null;
-      let answer;
       if (options) {
         options.forEach((c) => {
           const lab = add("label", "", box);
@@ -197,39 +224,78 @@ $("take-form").onsubmit = async (e) => {
           lab.append(" " + c);
           add("br", "", box);
         });
-        answer = () => (box.querySelector("input:checked") || {}).value || "";
+        getters.push(() => (box.querySelector("input:checked") || {}).value || "");
       } else {
         const inp = add("input", "", box);
         inp.type = "text"; inp.setAttribute("aria-label", "Your answer");
-        answer = () => inp.value;
+        getters.push(() => inp.value);
       }
       const hint = add("details", "", box);
       add("summary", "Hint", hint);
       add("p", it.hint, hint);
-      const result = add("p", "", box);
-      checks.push(() => {
-        const a = answer();
-        const right = a.trim().toLowerCase() === it.answer.trim().toLowerCase();
-        result.textContent = (right ? "✓ Right. " : `✗ The answer is: ${it.answer}. ${it.wrong[a] || ""} `) + it.why;
-      });
+      results.push(add("p", "", box));
     });
-    if (r.quiz.pairs.length) {
+    const selects = {};
+    if (r.quiz.terms.length) {
       const box = add("fieldset");
       add("legend", "Match each term with its meaning", box);
-      const meanings = r.quiz.pairs.map((p) => p.meaning).sort();
-      r.quiz.pairs.forEach((p) => {
-        const lab = add("label", p.term + " ", box);
+      r.quiz.terms.forEach((term) => {
+        const lab = add("label", term + " ", box);
         const sel = add("select", "", lab);
-        ["", ...meanings].forEach((m) => { const o = add("option", m || "choose…", sel); o.value = m; });
-        const result = add("span", "", lab);
+        ["", ...r.quiz.meanings].forEach((m) => { const o = add("option", m || "choose…", sel); o.value = m; });
+        results.push(add("span", "", lab));
         add("br", "", box);
-        checks.push(() => { result.textContent = sel.value === p.meaning ? " ✓" : ` ✗ ${p.meaning}`; });
+        selects[term] = sel;
       });
     }
+    const total = add("p");
     const btn = add("button", "Check my answers");
     btn.type = "button";
-    btn.onclick = () => checks.forEach((check) => check());
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const matches = Object.fromEntries(Object.entries(selects).map(([t, sel]) => [t, sel.value]));
+        const g = await call(`/quiz/${encodeURIComponent(id)}/grade`,
+          post({ student: $("student").value, answers: getters.map((get) => get()), matches }));
+        g.feedback.forEach((f, i) => {
+          results[i].textContent = f.right ? ` ✓ Right. ${f.why}` : ` ✗ The answer is: ${f.answer}. ${f.wrong} ${f.why}`;
+        });
+        total.textContent = `Score: ${g.score} / ${g.total} (saved)`;
+      } catch (err) { total.textContent = "Error: " + err.message; btn.disabled = false; }
+    };
   } catch (err) { out.textContent = "Error: " + err.message; }
+};
+
+// Study plan
+$("plan-form").onsubmit = async (e) => {
+  e.preventDefault();
+  show("plan-out", "Grisz is planning your life…");
+  try {
+    const p = await call("/plan", post({ exam_date: $("exam").value, topics: $("topics").value }));
+    show("plan-out", p.sessions.map((s) => `${s.date}: ${s.focus}\n   Read: ${s.pages.join("; ")}\n   Do: ${s.task}`).join("\n\n") + `\n\nGrisz: ${p.note}`);
+  } catch (err) { show("plan-out", "Error: " + err.message); }
+};
+
+// Progress report and deleting a student's results
+$("report-btn").onclick = async () => {
+  show("report-out", "Loading…");
+  try {
+    const r = await call("/report");
+    if (!r.quizzes.length) return show("report-out", "No quiz results yet.");
+    show("report-out", r.quizzes.map((q) =>
+      `Quiz: ${q.topic} (${q.quiz_id})\nAverage: ${q.average_percent}%\n` +
+      q.attempts.map((a) => `  ${a.student}: ${a.score}/${a.total} at ${a.at}`).join("\n") +
+      (q.most_missed.length ? "\nMost missed:\n" + q.most_missed.map(([label, n]) => `  ${n}× ${label}`).join("\n") : "")
+    ).join("\n\n"));
+  } catch (err) { show("report-out", "Error: " + err.message); }
+};
+
+$("delete-form").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const r = await call("/results/" + encodeURIComponent($("del-name").value.trim()), { method: "DELETE" });
+    show("delete-out", `Deleted ${r.deleted} result(s) for ${r.student}.`);
+  } catch (err) { show("delete-out", "Error: " + err.message); }
 };
 </script>
 </body>
