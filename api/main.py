@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from agents.graph import graph
 from agents.quiz import Kind, quiz_graph
-from engine.rag import DATA
+from engine.rag import CALLBACKS, DATA
 from worker.tasks import add_module, app as celery
 
 MAX_PDF_MB = 50
@@ -31,12 +31,12 @@ class Decision(BaseModel):
 
 
 def thread(quiz_id):
-    return {"configurable": {"thread_id": quiz_id}}
+    return {"configurable": {"thread_id": quiz_id}, "callbacks": CALLBACKS}
 
 
 @app.post("/ask")
 def ask(q: Question):
-    result = graph.invoke({"question": q.question})
+    result = graph.invoke({"question": q.question}, {"callbacks": CALLBACKS})
     return {"route": result["route"], "answer": result["answer"], "sources": result["sources"]}
 
 

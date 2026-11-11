@@ -19,6 +19,13 @@ load_dotenv(ROOT / ".env")
 Settings.embed_model = FastEmbedEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=str(STORAGE / "models"))
 Settings.llm = Groq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), api_key=os.environ["GROQ_API_KEY"])
 
+CALLBACKS = []  # passed to every LangGraph run; empty = no tracing
+if os.getenv("LANGFUSE_PUBLIC_KEY"):  # tracing is on only when Langfuse keys are in .env
+    from langfuse.langchain import CallbackHandler
+    from openinference.instrumentation.llama_index import LlamaIndexInstrumentor
+    LlamaIndexInstrumentor().instrument()  # LlamaIndex steps: retrieval, embeddings, Groq calls
+    CALLBACKS = [CallbackHandler()]        # LangGraph steps: router, quiz writer, checker
+
 GRISZ = PromptTemplate("""You are Grisz, a blunt, sarcastic talking bear who roasts lazy questions and wrong ideas but always actually helps.
 Rules:
 - Roast the question or the mistake, never the person: no insults about looks, identity or worth, no slurs. Never say that you are roasting.
