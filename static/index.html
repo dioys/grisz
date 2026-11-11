@@ -3,300 +3,114 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grisz</title>
+<title>Grisz exam</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; line-height: 1.5; }
-  section { border: 1px solid #bbb; border-radius: 8px; padding: 16px; margin: 16px 0; }
   label { display: block; margin-top: 8px; font-weight: 600; }
-  input, select, button { font: inherit; padding: 6px 10px; }
+  input, button { font: inherit; padding: 6px 10px; }
   input[type=text] { width: 100%; box-sizing: border-box; }
   button { margin-top: 10px; cursor: pointer; }
-  .idbox { font-size: 1.15em; background: #fff3c4; border: 2px solid #c9a227; border-radius: 6px; padding: 10px; }
-  .idbox strong { font-family: monospace; user-select: all; }
-  .out { white-space: pre-wrap; background: #f4f4f4; padding: 12px; border-radius: 6px; margin-top: 12px; }
   fieldset { margin: 12px 0; border-radius: 6px; }
-  fieldset label { display: inline; font-weight: normal; }
+  fieldset label { display: block; font-weight: normal; margin: 4px 0; }
+  .right { color: #156b3a; } .wrong { color: #a12a21; }
+  .msg { font-weight: 600; }
 </style>
 </head>
 <body>
-<h1>Grisz</h1>
-<p>Simple test page. The real design comes later.</p>
+<h1>Grisz exam</h1>
 
-<section>
-  <label for="code">Access code (from your teacher; teachers use the teacher code)</label>
-  <input id="code" type="password" autocomplete="off">
-</section>
+<form id="start-form">
+  <label for="name">Your name</label>
+  <input id="name" type="text" required maxlength="60">
+  <label for="code">Exam code (from your teacher)</label>
+  <input id="code" type="text" required maxlength="12" autocomplete="off" style="text-transform: uppercase">
+  <small>Your name, answers and score are saved so your teacher can grade them. Ask your teacher to delete them anytime.</small><br>
+  <button>Start exam</button>
+  <p id="start-msg" class="msg"></p>
+</form>
 
-<section>
-  <h2>Ask Grisz</h2>
-  <form id="ask-form">
-    <label for="question">Your question</label>
-    <input id="question" type="text" required maxlength="1000">
-    <button>Ask</button>
-  </form>
-  <div id="ask-out" class="out" hidden></div>
-</section>
-
-<section>
-  <h2>Upload a module (teacher)</h2>
-  <form id="upload-form">
-    <label for="pdf">PDF file, max 50 MB</label>
-    <input id="pdf" type="file" accept=".pdf" required>
-    <button>Upload</button>
-  </form>
-  <div id="upload-out" class="out" hidden></div>
-</section>
-
-<section>
-  <h2>Make a quiz (teacher)</h2>
-  <form id="quiz-form">
-    <label for="topic">Topic</label>
-    <input id="topic" type="text" required maxlength="200">
-    <label for="kind">Type</label>
-    <select id="kind">
-      <option value="mc">Multiple choice</option>
-      <option value="tf">True or false</option>
-      <option value="fill">Fill in the blank</option>
-      <option value="id">Identification</option>
-      <option value="matching">Matching</option>
-      <option value="mixed">Mixed</option>
-    </select>
-    <label for="n">Number of questions</label>
-    <input id="n" type="number" min="1" max="20" value="5">
-    <button>Make quiz</button>
-  </form>
-  <p id="id-box" class="idbox" hidden>Quiz id: <strong id="id-text"></strong> <button id="copy-id" type="button">Copy id</button> <span id="copied"></span></p>
-  <div id="quiz-out" class="out" hidden></div>
-  <p id="review" hidden><button id="approve" type="button">Approve</button> <button id="reject" type="button">Reject</button></p>
-</section>
-
-<section>
-  <h2>Take a quiz (student)</h2>
-  <form id="take-form">
-    <label for="quiz-id">Quiz id (from your teacher)</label>
-    <input id="quiz-id" type="text" required>
-    <label for="student">Your name</label>
-    <input id="student" type="text" required maxlength="60">
-    <small>Your name and score are saved on this server so your teacher can see your progress. Ask your teacher to delete them anytime.</small><br>
-    <button>Open quiz</button>
-  </form>
-  <div id="take-out"></div>
-</section>
-
-<section>
-  <h2>Study plan (student)</h2>
-  <form id="plan-form">
-    <label for="exam">Exam date</label>
-    <input id="exam" type="date" required>
-    <label for="topics">What the exam covers</label>
-    <input id="topics" type="text" required maxlength="300" placeholder="e.g. machine learning, for loops">
-    <button>Make my plan</button>
-  </form>
-  <div id="plan-out" class="out" hidden></div>
-</section>
-
-<section>
-  <h2>Progress report (teacher)</h2>
-  <button id="report-btn" type="button">Show report</button>
-  <div id="report-out" class="out" hidden></div>
-  <form id="delete-form">
-    <label for="del-name">Delete all saved results for a student</label>
-    <input id="del-name" type="text" required maxlength="60">
-    <button>Delete</button>
-  </form>
-  <div id="delete-out" class="out" hidden></div>
-</section>
+<div id="exam"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const post = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const el = (tag, text, parent) => {
+  const e = document.createElement(tag);
+  if (text) e.textContent = text;  // textContent, never innerHTML: exam text comes from the AI
+  if (parent) parent.appendChild(e);
+  return e;
+};
 
 async function call(url, opts) {
-  opts = opts || {};
-  opts.headers = { ...(opts.headers || {}), "X-Access-Code": $("code").value };  // sent with every request
   const r = await fetch(url, opts);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `${r.status} ${r.statusText}`);
+  if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : `${r.status} ${r.statusText}`);
   return data;
 }
 
-function show(id, text) { $(id).hidden = false; $(id).textContent = text; }
-
-function quizText(quiz) {
-  const lines = quiz.items.map((it, i) =>
-    `${i + 1}. [${it.type}] ${it.q}` +
-    it.choices.map((c, j) => `\n   ${"ABCD"[j]}) ${c}`).join("") +
-    `\n   Answer: ${it.answer}\n   Why: ${it.why}`);
-  quiz.pairs.forEach((p, i) => lines.push(`${i + 1}. ${p.term} = ${p.meaning}`));
-  return lines.join("\n\n");
-}
-
-// Ask
-$("ask-form").onsubmit = async (e) => {
+$("start-form").onsubmit = async (e) => {
   e.preventDefault();
-  show("ask-out", "Grisz is thinking…");
+  $("start-msg").textContent = "Loading…";
+  const code = $("code").value.trim().toUpperCase();
   try {
-    const r = await call("/ask", post({ question: $("question").value }));
-    show("ask-out", r.answer + (r.sources.length ? "\n\nSources:\n" + r.sources.join("\n") : ""));
-  } catch (err) { show("ask-out", "Error: " + err.message); }
+    const exam = await call("/exam/" + encodeURIComponent(code));
+    $("start-form").hidden = true;
+    showExam(code, exam);
+  } catch (err) { $("start-msg").textContent = err.message; }
 };
 
-// Upload, then check the background job every 3 seconds
-$("upload-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const body = new FormData();
-  body.append("file", $("pdf").files[0]);
-  show("upload-out", "Uploading…");
-  try {
-    const r = await call("/modules", { method: "POST", body });
-    watchJob(r.job, r.file);
-  } catch (err) { show("upload-out", "Error: " + err.message); }
-};
-
-async function watchJob(job, file) {
-  const r = await call("/jobs/" + job);
-  if (r.state === "SUCCESS") return show("upload-out", `${file}: done, ${r.result.pages} pages added.`);
-  if (r.state === "FAILURE") return show("upload-out", `${file}: failed. Check the worker log.`);
-  show("upload-out", `${file}: reading it… (${r.state})`);
-  setTimeout(() => watchJob(job, file), 3000);
-}
-
-// Make a quiz, then approve or reject it
-let quizId = null;
-$("quiz-form").onsubmit = async (e) => {
-  e.preventDefault();
-  $("review").hidden = true;
-  $("id-box").hidden = true;
-  show("quiz-out", "Writing and checking the quiz…");
-  try {
-    const r = await call("/quiz", post({ topic: $("topic").value, kind: $("kind").value, n: Number($("n").value) }));
-    quizId = r.id;
-    const problems = r.problems.length ? "\n\nProblems the checker couldn't fix:\n- " + r.problems.join("\n- ") : "";
-    $("id-text").textContent = r.id;
-    $("copied").textContent = "";
-    $("id-box").hidden = false;
-    $("quiz-id").value = r.id;  // also filled in under "Take a quiz"
-    show("quiz-out", `${quizText(r.quiz)}${problems}`);
-    $("review").hidden = false;
-  } catch (err) { show("quiz-out", "Error: " + err.message); }
-};
-
-async function review(approve) {
-  try {
-    const r = await call(`/quiz/${quizId}/review`, post({ approve }));
-    $("review").hidden = true;
-    show("quiz-out", $("quiz-out").textContent + `\n\nStatus: ${r.status}.` + (approve ? " Give students the quiz id above." : ""));
-  } catch (err) { show("quiz-out", $("quiz-out").textContent + "\n\nError: " + err.message); }
-}
-$("copy-id").onclick = async () => {
-  try { await navigator.clipboard.writeText(quizId); $("copied").textContent = "Copied"; }
-  catch { $("copied").textContent = "Select the id and press Ctrl+C"; }
-};
-$("approve").onclick = () => review(true);
-$("reject").onclick = () => review(false);
-
-// Take a quiz: the page only gets the questions; the server checks the answers and saves the score
-$("take-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const out = $("take-out");
-  out.textContent = "Loading…";
-  try {
-    const id = $("quiz-id").value.trim();
-    const r = await call("/quiz/" + encodeURIComponent(id));
-    if (!r.quiz) { out.textContent = `This quiz isn't ready yet (status: ${r.status}).`; return; }
-    out.textContent = "";
-    const add = (tag, text, parent = out) => {
-      const el = document.createElement(tag);
-      if (text) el.textContent = text;  // textContent, never innerHTML: quiz text comes from the AI
-      parent.appendChild(el);
-      return el;
-    };
-    const getters = [], results = [];
-    r.quiz.items.forEach((it, i) => {
-      const box = add("fieldset");
-      add("legend", `${i + 1}. ${it.q}`, box);
-      const options = it.type === "mc" ? it.choices : it.type === "tf" ? ["True", "False"] : null;
-      if (options) {
-        options.forEach((c) => {
-          const lab = add("label", "", box);
-          const inp = add("input", "", lab);
-          inp.type = "radio"; inp.name = "q" + i; inp.value = c;
-          lab.append(" " + c);
-          add("br", "", box);
-        });
-        getters.push(() => (box.querySelector("input:checked") || {}).value || "");
-      } else {
-        const inp = add("input", "", box);
-        inp.type = "text"; inp.setAttribute("aria-label", "Your answer");
-        getters.push(() => inp.value);
-      }
-      const hint = add("details", "", box);
-      add("summary", "Hint", hint);
-      add("p", it.hint, hint);
-      results.push(add("p", "", box));
-    });
-    const selects = {};
-    if (r.quiz.terms.length) {
-      const box = add("fieldset");
-      add("legend", "Match each term with its meaning", box);
-      r.quiz.terms.forEach((term) => {
-        const lab = add("label", term + " ", box);
-        const sel = add("select", "", lab);
-        ["", ...r.quiz.meanings].forEach((m) => { const o = add("option", m || "choose…", sel); o.value = m; });
-        results.push(add("span", "", lab));
-        add("br", "", box);
-        selects[term] = sel;
+function showExam(code, exam) {
+  const box = $("exam");
+  el("h2", exam.title, box);
+  el("p", `${$("name").value} · ${exam.questions.length} questions`, box);
+  const answers = [], results = [];
+  let section = null;
+  exam.questions.forEach((q, i) => {
+    if (q.type !== section) { section = q.type; el("h3", exam.sections[q.type], box); }
+    const f = el("fieldset", "", box);
+    el("legend", `${i + 1}. ${q.q}`, f);
+    const options = q.type === "mc" ? q.choices : q.type === "tf" ? ["True", "False"] : null;
+    if (options) {
+      options.forEach((c) => {
+        const lab = el("label", "", f);
+        const r = el("input", "", lab);
+        r.type = "radio"; r.name = "q" + i; r.value = c;
+        lab.append(" " + c);
       });
+      answers.push(() => (f.querySelector("input:checked") || {}).value || "");
+    } else {
+      const t = el("input", "", f);
+      t.type = "text"; t.setAttribute("aria-label", `Answer to question ${i + 1}`);
+      answers.push(() => t.value);
     }
-    const total = add("p");
-    const btn = add("button", "Check my answers");
-    btn.type = "button";
-    btn.onclick = async () => {
-      btn.disabled = true;
-      try {
-        const matches = Object.fromEntries(Object.entries(selects).map(([t, sel]) => [t, sel.value]));
-        const g = await call(`/quiz/${encodeURIComponent(id)}/grade`,
-          post({ student: $("student").value, answers: getters.map((get) => get()), matches }));
-        g.feedback.forEach((f, i) => {
-          results[i].textContent = f.right ? ` ✓ Right. ${f.why}` : ` ✗ The answer is: ${f.answer}. ${f.wrong} ${f.why}`;
-        });
-        total.textContent = `Score: ${g.score} / ${g.total} (saved)`;
-      } catch (err) { total.textContent = "Error: " + err.message; btn.disabled = false; }
-    };
-  } catch (err) { out.textContent = "Error: " + err.message; }
-};
-
-// Study plan
-$("plan-form").onsubmit = async (e) => {
-  e.preventDefault();
-  show("plan-out", "Grisz is planning your life…");
-  try {
-    const p = await call("/plan", post({ exam_date: $("exam").value, topics: $("topics").value }));
-    show("plan-out", p.sessions.map((s) => `${s.date}: ${s.focus}\n   Read: ${s.pages.join("; ")}\n   Do: ${s.task}`).join("\n\n") + `\n\nGrisz: ${p.note}`);
-  } catch (err) { show("plan-out", "Error: " + err.message); }
-};
-
-// Progress report and deleting a student's results
-$("report-btn").onclick = async () => {
-  show("report-out", "Loading…");
-  try {
-    const r = await call("/report");
-    if (!r.quizzes.length) return show("report-out", "No quiz results yet.");
-    show("report-out", r.quizzes.map((q) =>
-      `Quiz: ${q.topic} (${q.quiz_id})\nAverage: ${q.average_percent}%\n` +
-      q.attempts.map((a) => `  ${a.student}: ${a.score}/${a.total} at ${a.at}`).join("\n") +
-      (q.most_missed.length ? "\nMost missed:\n" + q.most_missed.map(([label, n]) => `  ${n}× ${label}`).join("\n") : "")
-    ).join("\n\n"));
-  } catch (err) { show("report-out", "Error: " + err.message); }
-};
-
-$("delete-form").onsubmit = async (e) => {
-  e.preventDefault();
-  try {
-    const r = await call("/results/" + encodeURIComponent($("del-name").value.trim()), { method: "DELETE" });
-    show("delete-out", `Deleted ${r.deleted} result(s) for ${r.student}.`);
-  } catch (err) { show("delete-out", "Error: " + err.message); }
-};
+    results.push(el("p", "", f));
+  });
+  const msg = el("p", "", box);
+  msg.className = "msg";
+  const btn = el("button", "Hand in", box);
+  let warned = false;
+  btn.onclick = async () => {
+    const given = answers.map((a) => a());
+    const blank = given.filter((a) => !a.trim()).length;
+    if (blank && !warned) { warned = true; msg.textContent = `You left ${blank} blank. Click "Hand in" again to hand in anyway.`; return; }
+    btn.disabled = true;
+    msg.textContent = "Grading…";
+    try {
+      const g = await call(`/exam/${encodeURIComponent(code)}/submit`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ student: $("name").value, answers: given }) });
+      box.querySelectorAll("input").forEach((x) => { x.disabled = true; });
+      g.results.forEach((r, i) => {
+        results[i].className = r.right ? "right" : "wrong";
+        results[i].textContent = r.right
+          ? `✓ Right. ${r.why} (${r.page})`
+          : `✗ The answer is: ${r.answer}. ${r.wrong} ${r.why} (${r.page})`;
+      });
+      msg.textContent = `Score: ${g.score} / ${g.total}. Saved for your teacher.`;
+      btn.remove();
+      box.prepend(msg.cloneNode(true));
+    } catch (err) { msg.textContent = err.message; btn.disabled = false; }
+  };
+}
 </script>
 </body>
 </html>

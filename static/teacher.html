@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grisz teacher dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; line-height: 1.5; }
+  section { border: 1px solid #bbb; border-radius: 8px; padding: 16px; margin: 16px 0; }
+  label { display: block; margin-top: 8px; font-weight: 600; }
+  input, select, button { font: inherit; padding: 6px 10px; }
+  input[type=text], input[type=password] { width: 100%; box-sizing: border-box; }
+  input[type=number] { width: 5em; }
+  button { margin: 6px 6px 0 0; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  .code { font-family: monospace; font-size: 1.4em; background: #fff3c4; border: 2px solid #c9a227; padding: 2px 8px; border-radius: 6px; user-select: all; }
+  .msg { white-space: pre-wrap; }
+  .right { color: #156b3a; } .wrong { color: #a12a21; }
+  .mix { display: flex; gap: 16px; flex-wrap: wrap; }
+  .mix label { font-weight: normal; }
+</style>
+</head>
+<body>
+<h1>Grisz teacher dashboard</h1>
+
+<form id="login">
+  <label for="password">Teacher password</label>
+  <input id="password" type="password" required autocomplete="current-password">
+  <button>Log in</button>
+  <p id="login-msg" class="msg"></p>
+</form>
+
+<div id="dash" hidden>
+  <section>
+    <h2>1. Lessons</h2>
+    <p>Each PDF is one subject. Upload a lesson, then make exams from it.</p>
+    <ul id="pdfs"></ul>
+    <form id="upload">
+      <label for="pdf">Upload a lesson PDF (max 50 MB)</label>
+      <input id="pdf" type="file" accept=".pdf" required>
+      <button>Upload</button>
+    </form>
+    <p id="upload-msg" class="msg"></p>
+  </section>
+
+  <section>
+    <h2>2. Make an exam</h2>
+    <form id="new-exam">
+      <label for="title">Exam title</label>
+      <input id="title" type="text" required maxlength="120" placeholder="e.g. Midterm: Python basics">
+      <label for="lesson">Lesson</label>
+      <select id="lesson" required></select>
+      <label>How many of each type</label>
+      <div class="mix">
+        <label>True or false <input id="n-tf" type="number" min="0" max="50" value="20"></label>
+        <label>Multiple choice <input id="n-mc" type="number" min="0" max="50" value="15"></label>
+        <label>Identification <input id="n-id" type="number" min="0" max="50" value="15"></label>
+        <label>Fill in the blank <input id="n-fill" type="number" min="0" max="50" value="0"></label>
+      </div>
+      <button>Make exam</button>
+    </form>
+    <p id="new-msg" class="msg"></p>
+  </section>
+
+  <section>
+    <h2>3. Exams</h2>
+    <p>Writing takes a few minutes. When it's ready, review it, then publish it to get the code for your students.</p>
+    <table>
+      <thead><tr><th>Exam</th><th>Status</th><th>Code</th><th>Handed in</th><th>Actions</th></tr></thead>
+      <tbody id="exams"></tbody>
+    </table>
+  </section>
+
+  <section id="detail" hidden></section>
+
+  <section>
+    <h2>Delete a student's results</h2>
+    <form id="del-student">
+      <label for="del-name">Student name (exactly as they typed it, any letter case)</label>
+      <input id="del-name" type="text" required maxlength="60">
+      <button>Delete all their results</button>
+    </form>
+    <p id="del-msg" class="msg"></p>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, text, parent) => {
+  const e = document.createElement(tag);
+  if (text !== undefined && text !== "") e.textContent = String(text);  // never innerHTML: exam text comes from the AI
+  if (parent) parent.appendChild(e);
+  return e;
+};
+const TYPES = { tf: "True or false", mc: "Multiple choice", id: "Identification", fill: "Fill in the blank" };
+let password = "";
+
+async function call(url, opts = {}) {
+  opts.headers = { ...(opts.headers || {}), "X-Teacher-Password": password };
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : `${r.status} ${r.statusText}`);
+  return data;
+}
+const post = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+$("login").onsubmit = async (e) => {
+  e.preventDefault();
+  password = $("password").value;
+  try {
+    await loadPdfs();
+    $("login").hidden = true;
+    $("dash").hidden = false;
+    loadExams();
+  } catch (err) { $("login-msg").textContent = err.message; }
+};
+
+// 1. Lessons
+async function loadPdfs() {
+  const pdfs = await call("/teacher/pdfs");
+  $("pdfs").replaceChildren(...pdfs.map((p) => el("li", p)));
+  $("lesson").replaceChildren(...pdfs.map((p) => { const o = el("option", p); o.value = p; return o; }));
+}
+
+$("upload").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = new FormData();
+  body.append("file", $("pdf").files[0]);
+  $("upload-msg").textContent = "Uploading…";
+  try {
+    const r = await call("/teacher/pdfs", { method: "POST", body });
+    watchUpload(r.job, r.file);
+  } catch (err) { $("upload-msg").textContent = err.message; }
+};
+
+async function watchUpload(job, file) {
+  try {
+    const r = await call("/teacher/jobs/" + job);
+    if (r.state === "SUCCESS") { $("upload-msg").textContent = `${file}: ready (${r.result.pages} pages).`; return loadPdfs(); }
+    if (r.state === "FAILURE") { $("upload-msg").textContent = `${file}: reading failed. Check the worker log.`; return; }
+    $("upload-msg").textContent = `${file}: reading it…`;
+    setTimeout(() => watchUpload(job, file), 3000);
+  } catch (err) { $("upload-msg").textContent = err.message; }
+}
+
+// 2. Make an exam
+$("new-exam").onsubmit = async (e) => {
+  e.preventDefault();
+  const mix = Object.fromEntries(Object.keys(TYPES).map((t) => [t, Number($("n-" + t).value) || 0]));
+  try {
+    await call("/teacher/exams", post({ title: $("title").value, pdf: $("lesson").value, mix }));
+    $("new-msg").textContent = "Grisz is writing it. Watch its status below.";
+    loadExams();
+  } catch (err) { $("new-msg").textContent = err.message; }
+};
+
+// 3. Exams list (refreshes itself while an exam is being written)
+let refresh = null;
+async function loadExams() {
+  clearTimeout(refresh);
+  const exams = await call("/teacher/exams");
+  $("exams").replaceChildren(...exams.map(examRow));
+  if (exams.some((x) => x.status === "writing")) refresh = setTimeout(loadExams, 5000);
+}
+
+function examRow(x) {
+  const tr = el("tr");
+  const name = el("td", "", tr);
+  el("strong", x.title, name);
+  el("div", `${x.pdf} · ` + Object.entries(x.mix).filter(([, n]) => n).map(([t, n]) => `${n} ${TYPES[t]}`).join(", "), name);
+  el("td", x.status + (x.status === "writing" ? ` (${x.progress || "starting"})` : ""), tr);
+  const code = el("td", "", tr);
+  if (x.code) { const c = el("span", x.code, code); c.className = "code"; if (x.status !== "published") el("div", "(closed)", code); }
+  el("td", x.submissions, tr);
+  const act = el("td", "", tr);
+  const btn = (label, fn) => { const b = el("button", label, act); b.type = "button"; b.onclick = fn; return b; };
+  if (["review", "published", "closed"].includes(x.status)) btn("Review", () => showReview(x.id));
+  if (["review", "closed"].includes(x.status)) btn("Publish", () => act_(`/teacher/exams/${x.id}/publish`, "POST"));
+  if (x.status === "published") btn("Close", () => act_(`/teacher/exams/${x.id}/close`, "POST"));
+  if (x.submissions) btn("Results", () => showResults(x.id));
+  if (x.status === "failed") btn("Why it failed", () => showReview(x.id));
+  const del = btn("Delete", () => {
+    if (del.dataset.sure) return act_(`/teacher/exams/${x.id}`, "DELETE");
+    del.dataset.sure = "1"; del.textContent = "Click again to delete (results too)";
+  });
+  return tr;
+}
+
+async function act_(url, method) {
+  try { await call(url, { method }); } catch (err) { alert(err.message); }
+  loadExams();
+}
+
+// Review: every question with its answer
+async function showReview(id) {
+  const x = await call("/teacher/exams/" + id);
+  const d = $("detail");
+  d.hidden = false;
+  d.replaceChildren();
+  el("h2", `Review: ${x.title}`, d);
+  if (x.problems.length) {
+    el("h3", "Problems the checker couldn't fix", d);
+    const ul = el("ul", "", d);
+    x.problems.forEach((p) => el("li", p, ul));
+  }
+  const ol = el("ol", "", d);
+  x.questions.forEach((q) => {
+    const li = el("li", "", ol);
+    el("strong", `[${TYPES[q.type]}] ${q.q}`, li);
+    if (q.choices.length) el("div", "Choices: " + q.choices.join(" | "), li);
+    el("div", `Answer: ${q.answer}  ·  ${q.page}`, li);
+    el("div", `Grisz: ${q.why}`, li);
+  });
+  d.scrollIntoView();
+}
+
+// Results: scores, most missed, every answer with a button to flip the mark
+async function showResults(id) {
+  const r = await call(`/teacher/exams/${id}/results`);
+  const d = $("detail");
+  d.hidden = false;
+  d.replaceChildren();
+  el("h2", `Results: ${r.title}`, d);
+  el("p", `Average: ${r.average_percent}%  ·  ${r.submissions.length} handed in`, d);
+  if (r.most_missed.length) {
+    el("h3", "Most missed", d);
+    const ul = el("ul", "", d);
+    r.most_missed.forEach((m) => el("li", `Q${m.question + 1} (${m.missed} missed): ${m.q}`, ul));
+  }
+  el("h3", "Students", d);
+  r.submissions.forEach((s) => {
+    const det = el("details", "", d);
+    const sum = el("summary", `${s.student}: ${s.score} / ${s.total}  (${s.created} UTC)`, det);
+    const ol = el("ol", "", det);
+    r.questions.forEach((q, i) => {
+      const li = el("li", "", ol);
+      el("div", q.q, li);
+      const line = el("div", "", li);
+      line.className = s.marks[i] ? "right" : "wrong";
+      line.textContent = `${s.marks[i] ? "✓" : "✗"} Answered: ${s.answers[i] || "(blank)"}  ·  Correct: ${q.answer}`;
+      const b = el("button", s.marks[i] ? "Mark wrong" : "Mark right", li);
+      b.type = "button";
+      b.onclick = async () => {
+        try {
+          const res = await call(`/teacher/submissions/${s.id}/mark`, post({ question: i, right: !s.marks[i] }));
+          s.marks[i] = !s.marks[i]; s.score = res.score;
+          line.className = s.marks[i] ? "right" : "wrong";
+          line.textContent = `${s.marks[i] ? "✓" : "✗"} Answered: ${s.answers[i] || "(blank)"}  ·  Correct: ${q.answer}`;
+          b.textContent = s.marks[i] ? "Mark wrong" : "Mark right";
+          sum.textContent = `${s.student}: ${s.score} / ${s.total}  (${s.created} UTC)`;
+        } catch (err) { alert(err.message); }
+      };
+    });
+  });
+  d.scrollIntoView();
+}
+
+// Delete a student's results
+$("del-student").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const r = await call("/teacher/students/" + encodeURIComponent($("del-name").value.trim()), { method: "DELETE" });
+    $("del-msg").textContent = `Deleted ${r.deleted} result(s) for ${r.student}.`;
+    loadExams();
+  } catch (err) { $("del-msg").textContent = err.message; }
+};
+</script>
+</body>
+</html>

@@ -3,10 +3,10 @@
 Nothing here has been run. Each step that can cost money says so. Do not start before every box in "Before deploying" is ticked.
 
 ## Before deploying
-- [ ] Full test run on the PC: page, access codes, uploads, quizzes, Grafana, Ragas, Langfuse
+- [ ] Full test run on the PC: teacher dashboard (upload, make, review, publish, results, override, delete), student exam, Grafana, Langfuse
 - [ ] Redesign + debug pass (owner's rule)
-- [ ] Privacy notice and terms on the site: questions and module text go to Groq (and Langfuse if tracing is on); **students' names and scores are stored** (`storage/results.db`); who runs the site; how to ask for deletion (teacher uses `DELETE /results/{name}`)
-- [ ] Long, different `TEACHER_CODE` and `STUDENT_CODE`
+- [ ] Privacy notice and terms on the site: questions and module text go to Groq (and Langfuse if tracing is on); **students' names, answers and scores are stored** (Docker volume `db`); who runs the site; how to ask for deletion (teacher dashboard → Delete a student's results)
+- [ ] A long `TEACHER_PASSWORD`
 - [ ] Only openly licensed or your own PDFs in `data/`
 
 ## Server: Oracle Cloud Always Free (recommended fit, ~810 MB needed)
@@ -39,5 +39,5 @@ They are not on the internet. From the PC: `ssh -L 3000:127.0.0.1:3000 ubuntu@<V
 
 ## What protects it
 - Only Caddy (80/443) is public; `/metrics` returns 404 from outside.
-- Access codes on every endpoint; 30 requests per minute per visitor (`RATE_LIMIT_PER_MINUTE`).
+- Teacher password on every `/teacher/` endpoint; exams only open with their code; 10 wrong codes or passwords a minute and that visitor waits (`FAILED_TRIES_PER_MINUTE`).
 - Uploads capped at 50 MB (app) and 55 MB (Caddy).

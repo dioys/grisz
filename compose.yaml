@@ -6,13 +6,15 @@ services:
     env_file: .env                   # your key stays on your PC, never inside the image
     environment: &env
       CHROMA_HOST: chroma            # use the shared Chroma server, not files
+      DB_PATH: /app/db/grisz.db       # exams and results
       REDIS_URL: redis://redis:6379/0
     volumes: &files
       - ./data:/app/data             # your PDFs
-      - ./storage:/app/storage       # model, quizzes
+      - ./storage:/app/storage       # embedding model
+      - db:/app/db                   # exams and results (a Docker volume: safe for two containers at once)
     depends_on: [redis, chroma]
 
-  worker:                            # reads uploaded PDFs in the background
+  worker:                            # reads uploaded PDFs and writes exams in the background
     build: .
     image: grisz
     command: celery -A worker.tasks worker --loglevel=info --concurrency=1
@@ -48,3 +50,6 @@ services:
       - ./ops/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
       - ./ops/grafana/grisz.json:/etc/grafana/provisioning/dashboards/grisz.json:ro
     depends_on: [prometheus]
+
+volumes:
+  db:

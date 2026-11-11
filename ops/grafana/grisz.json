@@ -3,39 +3,120 @@
   "title": "Grisz",
   "schemaVersion": 39,
   "refresh": "10s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "panels": [
     {
-      "type": "timeseries", "title": "Requests per minute, by endpoint",
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum by (handler) (rate(http_requests_total{handler!~\"/metrics|none\"}[1m])) * 60", "legendFormat": "{{handler}}" }]
+      "type": "timeseries",
+      "title": "Requests per minute, by endpoint",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (handler) (rate(http_requests_total{handler!~\"/metrics|none\"}[1m])) * 60",
+          "legendFormat": "{{handler}}"
+        }
+      ]
     },
     {
-      "type": "timeseries", "title": "Slowest 5% of requests (seconds)",
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
-      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{handler=~\"/ask|/quiz\"}[5m])))", "legendFormat": "{{handler}}" }]
+      "type": "timeseries",
+      "title": "Slowest 5% of requests (seconds)",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{handler=~\"/exam/.*|/teacher/.*\"}[5m])))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
     },
     {
-      "type": "piechart", "title": "Router decisions",
-      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum by (route) (increase(grisz_ask_routes_total[$__range]))", "legendFormat": "{{route}}" }]
+      "type": "stat",
+      "title": "Exams handed in",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(grisz_exam_submissions_total[$__range])) or vector(0)"
+        }
+      ]
     },
     {
-      "type": "stat", "title": "Average writer attempts per quiz",
-      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "decimals": 2 }, "overrides": [] },
-      "targets": [{ "expr": "sum(increase(grisz_quiz_tries_sum[$__range])) / sum(increase(grisz_quiz_tries_count[$__range]))" }]
+      "type": "stat",
+      "title": "Average exam score (%)",
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(grisz_exam_score_percent_sum[$__range])) / sum(increase(grisz_exam_score_percent_count[$__range]))"
+        }
+      ]
     },
     {
-      "type": "stat", "title": "Server errors (5xx)",
-      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(http_requests_total{status=~\"5..\"}[$__range])) or vector(0)" }]
+      "type": "stat",
+      "title": "Server errors (5xx)",
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(http_requests_total{status=~\"5..\"}[$__range])) or vector(0)"
+        }
+      ]
     }
   ]
 }

@@ -1,106 +1,103 @@
-"""Grisz's HTTP API. Run: uvicorn api.main:app --reload, then open http://127.0.0.1:8000/docs"""
+"""Grisz's HTTP API. Students: /exam/{code}. Teachers: /teacher/... (password). Pages: / and /teacher.html"""
 import hmac
-import json
 import os
+import secrets
 import time
-from collections import defaultdict, deque
-from datetime import date
+from collections import Counter as Tally, defaultdict, deque
 from uuid import uuid4
 
 from celery.result import AsyncResult
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from langgraph.types import Command
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
-from agents.graph import graph
-from agents.planner import make_plan
-from agents.quiz import Kind, quiz_graph
-from engine.rag import CALLBACKS, DATA, ROOT
-from api import results
-from worker.tasks import add_module, app as celery
+from agents.exam import TYPES, grade
+from api.db import query
+from engine.rag import DATA, ROOT
+from worker.tasks import add_module, app as celery, make_exam
 
 MAX_PDF_MB = 50
-
-
-def access(*roles):
-    """Only lets a request through if its X-Access-Code header matches one of these roles' codes in .env."""
-    def check(x_access_code: str = Header("")):
-        codes = [os.getenv(f"{role.upper()}_CODE", "") for role in roles]
-        if not any(codes):
-            raise HTTPException(503, "Access codes are not set in .env.")  # fail closed: no code set = nobody gets in
-        if not any(c and hmac.compare_digest(x_access_code.encode(), c.encode()) for c in codes):
-            raise HTTPException(401, "Wrong or missing access code.")
-    return Depends(check)
-
-
-TEACHER = access("teacher")
-ANYONE = access("teacher", "student")
+CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I, so codes are easy to read out
 
 app = FastAPI(title="Grisz")
 Instrumentator().instrument(app).expose(app)  # request counts and timings at /metrics, for Prometheus
+SUBMISSIONS = Counter("grisz_exam_submissions", "Exams handed in")
+SCORES = Histogram("grisz_exam_score_percent", "Scores of handed-in exams, in percent", buckets=[25, 50, 75, 90, 100])
 
-RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
-recent = defaultdict(deque)  # IP address -> times of its recent requests
+FAILED_LIMIT = int(os.getenv("FAILED_TRIES_PER_MINUTE", "10"))
+failed = defaultdict(deque)  # IP address -> times of its recent wrong codes or passwords
 
 
 @app.middleware("http")
-async def rate_limit(request: Request, call_next):
-    """Each IP gets RATE_LIMIT requests a minute: protects the Groq quota and slows down code guessing."""
-    if request.url.path.startswith(("/ask", "/quiz", "/modules", "/plan")):  # /jobs is left out: the page checks it every 3 s
-        now, hits = time.monotonic(), recent[request.client.host if request.client else "?"]
-        while hits and now - hits[0] > 60:
-            hits.popleft()
-        if len(hits) >= RATE_LIMIT:
-            return JSONResponse({"detail": "Too many requests. Wait a minute."}, status_code=429)
+async def slow_down_guessing(request: Request, call_next):
+    """After 10 wrong exam codes or teacher passwords in a minute, that IP has to wait.
+    Only failures count, so a whole class behind one school IP can still take an exam."""
+    ip = request.client.host if request.client else "?"
+    now, hits = time.monotonic(), failed[ip]
+    while hits and now - hits[0] > 60:
+        hits.popleft()
+    if len(hits) >= FAILED_LIMIT:
+        return JSONResponse({"detail": "Too many wrong tries. Wait a minute."}, status_code=429)
+    response = await call_next(request)
+    if response.status_code in (401, 404) and request.url.path.startswith(("/exam/", "/teacher/")):
         hits.append(now)
-    return await call_next(request)
-ROUTES = Counter("grisz_ask_routes", "Questions by router decision", ["route"])
-QUIZ_TRIES = Histogram("grisz_quiz_tries", "Writer attempts per quiz (1 = right first time)", buckets=[1, 2, 3])
+    return response
 
 
-class Question(BaseModel):
-    question: str = Field(min_length=1, max_length=1000)  # caps how much text one request sends to Groq
+def teacher_password(x_teacher_password: str = Header("")):
+    real = os.getenv("TEACHER_PASSWORD", "")
+    if not real:
+        raise HTTPException(503, "TEACHER_PASSWORD is not set in .env.")  # fail closed
+    if not hmac.compare_digest(x_teacher_password.encode(), real.encode()):
+        raise HTTPException(401, "Wrong password.")
 
 
-class QuizRequest(BaseModel):
-    topic: str = Field(min_length=1, max_length=200)
-    kind: Kind = "mc"
-    n: int = Field(5, ge=1, le=20)
+teacher = APIRouter(prefix="/teacher", dependencies=[Depends(teacher_password)])
 
 
-class Decision(BaseModel):
-    approve: bool
+class Mix(BaseModel):
+    tf: int = Field(0, ge=0, le=50)
+    mc: int = Field(0, ge=0, le=50)
+    id: int = Field(0, ge=0, le=50)
+    fill: int = Field(0, ge=0, le=50)
 
 
-class Answers(BaseModel):
-    student: str = Field(min_length=1, max_length=60)  # the name is saved with the score
-    answers: list[str] = []         # one per question, in order
-    matches: dict[str, str] = {}    # matching questions: term -> chosen meaning
+class NewExam(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    pdf: str
+    mix: Mix
 
 
-class PlanRequest(BaseModel):
-    exam_date: date
-    topics: str = Field(min_length=1, max_length=300)
+class Mark(BaseModel):
+    question: int = Field(ge=0)
+    right: bool
 
 
-def thread(quiz_id):
-    return {"configurable": {"thread_id": quiz_id}, "callbacks": CALLBACKS}
+class Submission(BaseModel):
+    student: str = Field(min_length=1, max_length=60)  # saved with the score
+    answers: list[str] = Field(max_length=200)
 
 
-@app.post("/ask", dependencies=[ANYONE])
-def ask(q: Question):
-    result = graph.invoke({"question": q.question}, {"callbacks": CALLBACKS})
-    ROUTES.labels(result["route"]).inc()
-    return {"route": result["route"], "answer": result["answer"], "sources": result["sources"]}
+def get_exam(exam_id):
+    rows = query("SELECT * FROM exams WHERE id = ?", exam_id)
+    if not rows:
+        raise HTTPException(404, "No exam with that id.")
+    return rows[0]
 
 
-@app.post("/modules", dependencies=[TEACHER])
-def upload_module(file: UploadFile):
-    """Teacher: upload a PDF. A background worker reads and indexes it; check progress at /jobs/{id}."""
+# ---------- Teacher: lessons ----------
+
+@teacher.get("/pdfs")
+def list_pdfs():
+    return sorted(p.name for p in DATA.glob("*.pdf"))
+
+
+@teacher.post("/pdfs")
+def upload_pdf(file: UploadFile):
+    """Upload a lesson PDF. A background worker reads it; check progress at /teacher/jobs/{id}."""
     name = (file.filename or "").replace("\\", "/").split("/")[-1]  # drop any folder part of the name
     if not name.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files.")
@@ -108,112 +105,150 @@ def upload_module(file: UploadFile):
         raise HTTPException(413, f"PDF is over {MAX_PDF_MB} MB.")
     path = DATA / name
     if path.exists():
-        raise HTTPException(409, "A module with that file name is already uploaded.")
+        raise HTTPException(409, "A lesson with that file name is already uploaded.")
     path.write_bytes(file.file.read())
     return {"job": add_module.delay(str(path)).id, "file": name}
 
 
-@app.get("/jobs/{job_id}", dependencies=[TEACHER])
+@teacher.get("/jobs/{job_id}")
 def job_status(job_id: str):
     """PENDING (still working, or unknown id), SUCCESS (with page count) or FAILURE."""
     job = AsyncResult(job_id, app=celery)
     return {"job": job_id, "state": job.state, "result": job.result if job.successful() else None}
 
 
-@app.post("/quiz", dependencies=[TEACHER])
-def make_quiz(r: QuizRequest):
-    """Teacher: generate a quiz. It waits for review; problems lists anything the checker couldn't fix."""
-    quiz_id = uuid4().hex
-    s = quiz_graph.invoke(r.model_dump(), thread(quiz_id))
-    QUIZ_TRIES.observe(s["tries"])
-    return {"id": quiz_id, "status": "pending", "quiz": s["quiz"], "problems": s["problems"]}
+# ---------- Teacher: exams ----------
+
+@teacher.post("/exams")
+def new_exam(e: NewExam):
+    """Starts writing an exam in the background. Watch its status and progress in GET /teacher/exams."""
+    if e.pdf not in list_pdfs():
+        raise HTTPException(404, "No lesson PDF with that name.")
+    mix = e.mix.model_dump()
+    if not 1 <= sum(mix.values()) <= 100:
+        raise HTTPException(400, "An exam needs 1 to 100 questions.")
+    exam_id = uuid4().hex
+    query("INSERT INTO exams (id, title, pdf, mix, status) VALUES (?, ?, ?, ?, 'writing')", exam_id, e.title, e.pdf, mix)
+    make_exam.delay(exam_id)
+    return {"id": exam_id}
 
 
-@app.post("/quiz/{quiz_id}/review", dependencies=[TEACHER])
-def review(quiz_id: str, d: Decision):
-    """Teacher: approve or reject a pending quiz."""
-    snap = quiz_graph.get_state(thread(quiz_id))
-    if not snap.values:
-        raise HTTPException(404, "No quiz with that id.")
-    if snap.next != ("teacher",):
-        raise HTTPException(409, "This quiz was already reviewed.")
-    s = quiz_graph.invoke(Command(resume=d.approve), thread(quiz_id))
-    return {"id": quiz_id, "status": s["status"]}
+@teacher.get("/exams")
+def list_exams():
+    return query("SELECT e.id, e.title, e.pdf, e.mix, e.status, e.progress, e.code, e.created, "
+                 "(SELECT COUNT(*) FROM submissions s WHERE s.exam_id = e.id) AS submissions "
+                 "FROM exams e ORDER BY e.created DESC")
 
 
-def quiz_state(quiz_id):
-    s = quiz_graph.get_state(thread(quiz_id)).values
-    if not s:
-        raise HTTPException(404, "No quiz with that id.")
-    return s
+@teacher.get("/exams/{exam_id}")
+def review_exam(exam_id: str):
+    """Every question with its answer, plus anything the checker couldn't fix."""
+    return get_exam(exam_id)
 
 
-@app.get("/quiz/{quiz_id}", dependencies=[ANYONE])
-def get_quiz(quiz_id: str):
-    """Student: the questions only (no answers), once a teacher has approved the quiz."""
-    s = quiz_state(quiz_id)
-    status = s.get("status", "pending")
-    if status != "approved":
-        return {"id": quiz_id, "status": status, "quiz": None}
-    quiz = s["quiz"]
-    return {"id": quiz_id, "status": status, "quiz": {
-        "items": [{k: it[k] for k in ("type", "q", "choices", "hint")} for it in quiz["items"]],
-        "terms": [p["term"] for p in quiz["pairs"]],
-        "meanings": sorted(p["meaning"] for p in quiz["pairs"])}}
+@teacher.post("/exams/{exam_id}/publish")
+def publish(exam_id: str):
+    """Gives the exam a code that students type in to take it."""
+    exam = get_exam(exam_id)
+    if exam["status"] not in ("review", "closed"):
+        raise HTTPException(409, f"An exam that is '{exam['status']}' can't be published.")
+    code = exam["code"] or "".join(secrets.choice(CODE_LETTERS) for _ in range(6))
+    query("UPDATE exams SET status = 'published', code = ? WHERE id = ?", code, exam_id)
+    return {"code": code}
 
 
-@app.post("/quiz/{quiz_id}/grade", dependencies=[ANYONE])
-def grade(quiz_id: str, a: Answers):
-    """Student: check answers on the server, save the score with the student's name, return feedback."""
-    s = quiz_state(quiz_id)
-    if s.get("status") != "approved":
-        raise HTTPException(409, "This quiz isn't open yet.")
-    feedback, missed = [], []
-    for i, it in enumerate(s["quiz"]["items"]):
-        given = a.answers[i] if i < len(a.answers) else ""
-        right = given.strip().lower() == it["answer"].strip().lower()
-        feedback.append({"right": right, "answer": it["answer"], "why": it["why"], "wrong": it["wrong"].get(given, "")})
-        if not right:
-            missed.append(it["q"])
-    for p in s["quiz"]["pairs"]:
-        right = a.matches.get(p["term"]) == p["meaning"]
-        feedback.append({"right": right, "answer": p["meaning"], "why": "", "wrong": ""})
-        if not right:
-            missed.append(p["term"])
-    score = sum(f["right"] for f in feedback)
-    results.save(quiz_id, a.student.strip(), score, len(feedback), missed)
-    return {"score": score, "total": len(feedback), "feedback": feedback}
+@teacher.post("/exams/{exam_id}/close")
+def close(exam_id: str):
+    """The code stops working; results are kept."""
+    get_exam(exam_id)
+    query("UPDATE exams SET status = 'closed' WHERE id = ?", exam_id)
+    return {"status": "closed"}
 
 
-@app.get("/report", dependencies=[TEACHER])
-def report():
-    """Teacher: per quiz, every attempt (name, score, time), the average and the most-missed questions."""
-    out = {}
-    for quiz_id, student, score, total, missed, at in results.all_rows():
-        q = out.setdefault(quiz_id, {"quiz_id": quiz_id, "attempts": [], "missed": {},
-                                     "topic": quiz_graph.get_state(thread(quiz_id)).values.get("topic", "?")})
-        q["attempts"].append({"student": student, "score": score, "total": total, "at": at})
-        for label in json.loads(missed):
-            q["missed"][label] = q["missed"].get(label, 0) + 1
-    for q in out.values():
-        q["average_percent"] = round(100 * sum(x["score"] for x in q["attempts"]) / max(1, sum(x["total"] for x in q["attempts"])))
-        q["most_missed"] = sorted(q.pop("missed").items(), key=lambda kv: -kv[1])[:5]
-    return {"quizzes": list(out.values())}
+@teacher.delete("/exams/{exam_id}")
+def delete_exam(exam_id: str):
+    """Deletes the exam and every student's result for it."""
+    get_exam(exam_id)
+    query("DELETE FROM submissions WHERE exam_id = ?", exam_id)
+    query("DELETE FROM exams WHERE id = ?", exam_id)
+    return {"deleted": exam_id}
 
 
-@app.delete("/results/{student}", dependencies=[TEACHER])
-def delete_results(student: str):
-    """Teacher: delete every saved result for one student (for deletion requests)."""
-    return {"student": student, "deleted": results.delete(student)}
+# ---------- Teacher: grading ----------
+
+@teacher.get("/exams/{exam_id}/results")
+def results(exam_id: str):
+    """Every submission (answers and marks), the average, and the 10 most-missed questions."""
+    exam = get_exam(exam_id)
+    subs = query("SELECT id, student, answers, marks, score, total, created FROM submissions WHERE exam_id = ? ORDER BY created", exam_id)
+    missed = Tally(i for s in subs for i, ok in enumerate(s["marks"]) if not ok)
+    return {
+        "title": exam["title"],
+        "questions": exam["questions"],
+        "submissions": subs,
+        "average_percent": round(100 * sum(s["score"] for s in subs) / max(1, sum(s["total"] for s in subs))),
+        "most_missed": [{"question": i, "q": exam["questions"][i]["q"], "missed": n} for i, n in missed.most_common(10)],
+    }
 
 
-@app.post("/plan", dependencies=[ANYONE])
-def plan(r: PlanRequest):
-    """Student: a study plan from today to the exam, from the matching module pages."""
-    if not 1 <= (r.exam_date - date.today()).days <= 180:
-        raise HTTPException(400, "The exam date must be between tomorrow and 180 days from now.")
-    return make_plan(r.exam_date, r.topics, CALLBACKS)
+@teacher.post("/submissions/{submission_id}/mark")
+def override(submission_id: int, m: Mark):
+    """The teacher flips one question's mark; the score is recounted."""
+    rows = query("SELECT marks FROM submissions WHERE id = ?", submission_id)
+    if not rows:
+        raise HTTPException(404, "No submission with that id.")
+    marks = rows[0]["marks"]
+    if m.question >= len(marks):
+        raise HTTPException(400, "No question with that number.")
+    marks[m.question] = m.right
+    query("UPDATE submissions SET marks = ?, score = ? WHERE id = ?", marks, sum(marks), submission_id)
+    return {"score": sum(marks), "total": len(marks)}
 
 
-# The simple test page at http://127.0.0.1:8000/ (added last, so the API routes above win)
-app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="page")
+@teacher.delete("/students/{name}")
+def delete_student(name: str):
+    """Deletes every saved result for one student name (for deletion requests)."""
+    n = query("SELECT COUNT(*) AS n FROM submissions WHERE lower(student) = lower(?)", name)[0]["n"]
+    query("DELETE FROM submissions WHERE lower(student) = lower(?)", name)
+    return {"student": name, "deleted": n}
+
+
+app.include_router(teacher)
+
+
+# ---------- Students ----------
+
+def open_exam(code):
+    rows = query("SELECT * FROM exams WHERE code = ? AND status = 'published'", code.strip().upper())
+    if not rows:
+        raise HTTPException(404, "No open exam with that code.")
+    return rows[0]
+
+
+@app.get("/exam/{code}")
+def take_exam(code: str):
+    """The questions only: no answers until the exam is handed in."""
+    exam = open_exam(code)
+    return {"title": exam["title"], "sections": TYPES,
+            "questions": [{"type": q["type"], "q": q["q"], "choices": q["choices"]} for q in exam["questions"]]}
+
+
+@app.post("/exam/{code}/submit")
+def submit(code: str, s: Submission):
+    """Grades the answers, saves the score with the student's name, and shows the answers with Grisz's notes."""
+    exam = open_exam(code)
+    questions = exam["questions"]
+    marks = grade(questions, s.answers)
+    score = sum(marks)
+    query("INSERT INTO submissions (exam_id, student, answers, marks, score, total) VALUES (?, ?, ?, ?, ?, ?)",
+          exam["id"], s.student.strip(), s.answers, marks, score, len(marks))
+    SUBMISSIONS.inc()
+    SCORES.observe(100 * score / max(1, len(marks)))
+    return {"score": score, "total": len(marks), "results": [
+        {"right": ok, "given": s.answers[i] if i < len(s.answers) else "", "answer": q["answer"],
+         "why": q["why"], "wrong": q["wrong"].get(s.answers[i], "") if i < len(s.answers) else "", "page": q["page"]}
+        for i, (q, ok) in enumerate(zip(questions, marks))]}
+
+
+# The pages: / (students) and /teacher.html (teachers). Added last, so the API routes above win.
+app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="pages")
