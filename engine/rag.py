@@ -1,5 +1,6 @@
 """Week 1: answer questions about module PDFs, with page citations, in Grisz's voice."""
 import os
+import re
 from functools import cache
 from pathlib import Path
 
@@ -64,13 +65,23 @@ def add_pdf(path):
     return len(docs)
 
 
+NO_FIX = re.compile(r"\bno (spelling|grammar|errors?|mistakes?|corrections?)\b|\bnone\b|nothing to (fix|correct)", re.I)
+
+
+def drop_empty_fix(answer):
+    """Remove a ✏️ line that only says there was nothing to correct."""
+    lines = [l for l in answer.splitlines() if not (l.strip().startswith("✏️") and NO_FIX.search(l))]
+    return "\n".join(lines).strip()
+
+
 def ask(index, question):
     """Grisz's answer, plus the file and page behind each [n]."""
     engine = CitationQueryEngine.from_args(index, similarity_top_k=4, citation_qa_template=GRISZ)
     response = engine.query(question)
     sources = [f"[{i}] {n.metadata['file_name']}, p. {n.metadata['page_label']}"
                for i, n in enumerate(response.source_nodes, 1)]
-    return {"answer": str(response), "sources": sources}
+    contexts = [n.get_content() for n in response.source_nodes]  # the page text Grisz was given (for Ragas)
+    return {"answer": drop_empty_fix(str(response)), "sources": sources, "contexts": contexts}
 
 
 def context(index, topic, k=6):

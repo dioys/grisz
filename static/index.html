@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grisz</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; line-height: 1.5; }
+  section { border: 1px solid #bbb; border-radius: 8px; padding: 16px; margin: 16px 0; }
+  label { display: block; margin-top: 8px; font-weight: 600; }
+  input, select, button { font: inherit; padding: 6px 10px; }
+  input[type=text] { width: 100%; box-sizing: border-box; }
+  button { margin-top: 10px; cursor: pointer; }
+  .out { white-space: pre-wrap; background: #f4f4f4; padding: 12px; border-radius: 6px; margin-top: 12px; }
+  fieldset { margin: 12px 0; border-radius: 6px; }
+  fieldset label { display: inline; font-weight: normal; }
+</style>
+</head>
+<body>
+<h1>Grisz</h1>
+<p>Simple test page. The real design comes later.</p>
+
+<section>
+  <label for="code">Access code (from your teacher; teachers use the teacher code)</label>
+  <input id="code" type="password" autocomplete="off">
+</section>
+
+<section>
+  <h2>Ask Grisz</h2>
+  <form id="ask-form">
+    <label for="question">Your question</label>
+    <input id="question" type="text" required maxlength="1000">
+    <button>Ask</button>
+  </form>
+  <div id="ask-out" class="out" hidden></div>
+</section>
+
+<section>
+  <h2>Upload a module (teacher)</h2>
+  <form id="upload-form">
+    <label for="pdf">PDF file, max 50 MB</label>
+    <input id="pdf" type="file" accept=".pdf" required>
+    <button>Upload</button>
+  </form>
+  <div id="upload-out" class="out" hidden></div>
+</section>
+
+<section>
+  <h2>Make a quiz (teacher)</h2>
+  <form id="quiz-form">
+    <label for="topic">Topic</label>
+    <input id="topic" type="text" required maxlength="200">
+    <label for="kind">Type</label>
+    <select id="kind">
+      <option value="mc">Multiple choice</option>
+      <option value="tf">True or false</option>
+      <option value="fill">Fill in the blank</option>
+      <option value="id">Identification</option>
+      <option value="matching">Matching</option>
+      <option value="mixed">Mixed</option>
+    </select>
+    <label for="n">Number of questions</label>
+    <input id="n" type="number" min="1" max="20" value="5">
+    <button>Make quiz</button>
+  </form>
+  <div id="quiz-out" class="out" hidden></div>
+  <p id="review" hidden><button id="approve" type="button">Approve</button> <button id="reject" type="button">Reject</button></p>
+</section>
+
+<section>
+  <h2>Take a quiz (student)</h2>
+  <form id="take-form">
+    <label for="quiz-id">Quiz id (from your teacher)</label>
+    <input id="quiz-id" type="text" required>
+    <button>Open quiz</button>
+  </form>
+  <div id="take-out"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const post = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+async function call(url, opts) {
+  opts = opts || {};
+  opts.headers = { ...(opts.headers || {}), "X-Access-Code": $("code").value };  // sent with every request
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `${r.status} ${r.statusText}`);
+  return data;
+}
+
+function show(id, text) { $(id).hidden = false; $(id).textContent = text; }
+
+function quizText(quiz) {
+  const lines = quiz.items.map((it, i) =>
+    `${i + 1}. [${it.type}] ${it.q}` +
+    it.choices.map((c, j) => `\n   ${"ABCD"[j]}) ${c}`).join("") +
+    `\n   Answer: ${it.answer}\n   Why: ${it.why}`);
+  quiz.pairs.forEach((p, i) => lines.push(`${i + 1}. ${p.term} = ${p.meaning}`));
+  return lines.join("\n\n");
+}
+
+// Ask
+$("ask-form").onsubmit = async (e) => {
+  e.preventDefault();
+  show("ask-out", "Grisz is thinking…");
+  try {
+    const r = await call("/ask", post({ question: $("question").value }));
+    show("ask-out", r.answer + (r.sources.length ? "\n\nSources:\n" + r.sources.join("\n") : ""));
+  } catch (err) { show("ask-out", "Error: " + err.message); }
+};
+
+// Upload, then check the background job every 3 seconds
+$("upload-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = new FormData();
+  body.append("file", $("pdf").files[0]);
+  show("upload-out", "Uploading…");
+  try {
+    const r = await call("/modules", { method: "POST", body });
+    watchJob(r.job, r.file);
+  } catch (err) { show("upload-out", "Error: " + err.message); }
+};
+
+async function watchJob(job, file) {
+  const r = await call("/jobs/" + job);
+  if (r.state === "SUCCESS") return show("upload-out", `${file}: done, ${r.result.pages} pages added.`);
+  if (r.state === "FAILURE") return show("upload-out", `${file}: failed. Check the worker log.`);
+  show("upload-out", `${file}: reading it… (${r.state})`);
+  setTimeout(() => watchJob(job, file), 3000);
+}
+
+// Make a quiz, then approve or reject it
+let quizId = null;
+$("quiz-form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("review").hidden = true;
+  show("quiz-out", "Writing and checking the quiz…");
+  try {
+    const r = await call("/quiz", post({ topic: $("topic").value, kind: $("kind").value, n: Number($("n").value) }));
+    quizId = r.id;
+    const problems = r.problems.length ? "\n\nProblems the checker couldn't fix:\n- " + r.problems.join("\n- ") : "";
+    show("quiz-out", `Quiz id: ${r.id}\n\n${quizText(r.quiz)}${problems}`);
+    $("review").hidden = false;
+  } catch (err) { show("quiz-out", "Error: " + err.message); }
+};
+
+async function review(approve) {
+  try {
+    const r = await call(`/quiz/${quizId}/review`, post({ approve }));
+    $("review").hidden = true;
+    show("quiz-out", $("quiz-out").textContent + `\n\nStatus: ${r.status}.` + (approve ? ` Give students this id: ${quizId}` : ""));
+  } catch (err) { show("quiz-out", $("quiz-out").textContent + "\n\nError: " + err.message); }
+}
+$("approve").onclick = () => review(true);
+$("reject").onclick = () => review(false);
+
+// Take a quiz (only approved quizzes come back)
+$("take-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const out = $("take-out");
+  out.textContent = "Loading…";
+  try {
+    const r = await call("/quiz/" + encodeURIComponent($("quiz-id").value.trim()));
+    if (!r.quiz) { out.textContent = `This quiz isn't ready yet (status: ${r.status}).`; return; }
+    out.textContent = "";
+    const add = (tag, text, parent = out) => {
+      const el = document.createElement(tag);
+      if (text) el.textContent = text;  // textContent, never innerHTML: quiz text comes from the AI
+      parent.appendChild(el);
+      return el;
+    };
+    const checks = [];
+    r.quiz.items.forEach((it, i) => {
+      const box = add("fieldset");
+      add("legend", `${i + 1}. ${it.q}`, box);
+      const options = it.type === "mc" ? it.choices : it.type === "tf" ? ["True", "False"] : null;
+      let answer;
+      if (options) {
+        options.forEach((c) => {
+          const lab = add("label", "", box);
+          const inp = add("input", "", lab);
+          inp.type = "radio"; inp.name = "q" + i; inp.value = c;
+          lab.append(" " + c);
+          add("br", "", box);
+        });
+        answer = () => (box.querySelector("input:checked") || {}).value || "";
+      } else {
+        const inp = add("input", "", box);
+        inp.type = "text"; inp.setAttribute("aria-label", "Your answer");
+        answer = () => inp.value;
+      }
+      const hint = add("details", "", box);
+      add("summary", "Hint", hint);
+      add("p", it.hint, hint);
+      const result = add("p", "", box);
+      checks.push(() => {
+        const a = answer();
+        const right = a.trim().toLowerCase() === it.answer.trim().toLowerCase();
+        result.textContent = (right ? "✓ Right. " : `✗ The answer is: ${it.answer}. ${it.wrong[a] || ""} `) + it.why;
+      });
+    });
+    if (r.quiz.pairs.length) {
+      const box = add("fieldset");
+      add("legend", "Match each term with its meaning", box);
+      const meanings = r.quiz.pairs.map((p) => p.meaning).sort();
+      r.quiz.pairs.forEach((p) => {
+        const lab = add("label", p.term + " ", box);
+        const sel = add("select", "", lab);
+        ["", ...meanings].forEach((m) => { const o = add("option", m || "choose…", sel); o.value = m; });
+        const result = add("span", "", lab);
+        add("br", "", box);
+        checks.push(() => { result.textContent = sel.value === p.meaning ? " ✓" : ` ✗ ${p.meaning}`; });
+      });
+    }
+    const btn = add("button", "Check my answers");
+    btn.type = "button";
+    btn.onclick = () => checks.forEach((check) => check());
+  } catch (err) { out.textContent = "Error: " + err.message; }
+};
+</script>
+</body>
+</html>

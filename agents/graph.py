@@ -37,7 +37,8 @@ def route_question(state):
 
 
 def answer(state):
-    return ask(index, state["question"])
+    r = ask(index, state["question"])
+    return {"answer": r["answer"], "sources": r["sources"]}
 
 
 def refuse(state):

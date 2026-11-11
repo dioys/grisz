@@ -1,0 +1,6 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: grisz
+    static_configs:
+      - targets: ["api:8000"]   # reads http://api:8000/metrics

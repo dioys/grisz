@@ -20,11 +20,11 @@ POST /modules ─→ Redis ─→ Celery worker ─→ Chroma
 ## Run it
 Needs Docker Desktop and a free [Groq](https://console.groq.com) API key.
 ```bash
-cp .env.example .env    # add your GROQ_API_KEY
+cp .env.example .env    # add GROQ_API_KEY, TEACHER_CODE and STUDENT_CODE
 mkdir data              # put PDF modules here, or upload them via POST /modules
 docker compose up --build
 ```
-Open http://127.0.0.1:8000/docs.
+Open http://127.0.0.1:8000/ (simple test page) or http://127.0.0.1:8000/docs. Every request needs the `X-Access-Code` header: the teacher code or the student code.
 
 | Endpoint | Who | What |
 |---|---|---|
@@ -35,7 +35,7 @@ Open http://127.0.0.1:8000/docs.
 | `POST /quiz/{id}/review` | teacher | approve or reject |
 | `GET /quiz/{id}` | student | the quiz, once approved |
 
-⚠️ No user accounts yet: anyone who can reach the API can approve quizzes. Run it locally only.
+⚠️ Access is two shared codes (teacher and student), not personal accounts, and there is no rate limiting yet. Run it locally only.
 
 ## Test content
 Developed with *Introduction to Python Programming* (OpenStax) and *AI for Teachers: an Open Textbook* (de la Higuera & Iyer), both CC BY 4.0. Module PDFs are not included in this repo.

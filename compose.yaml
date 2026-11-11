@@ -28,3 +28,23 @@ services:
     image: chromadb/chroma:1.5.9
     volumes:
       - ./storage/chroma-server:/data
+
+  prometheus:                        # collects Grisz's /metrics every 15 s
+    image: prom/prometheus:v3.5.0
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on: [api]
+
+  grafana:                           # dashboards at http://127.0.0.1:3000
+    image: grafana/grafana:12.1.0
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # open the dashboard without logging in (your PC only)
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./ops/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./ops/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./ops/grafana/grisz.json:/etc/grafana/provisioning/dashboards/grisz.json:ro
+    depends_on: [prometheus]

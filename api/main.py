@@ -1,19 +1,42 @@
 """Grisz's HTTP API. Run: uvicorn api.main:app --reload, then open http://127.0.0.1:8000/docs"""
+import hmac
+import os
 from uuid import uuid4
 
 from celery.result import AsyncResult
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
+from prometheus_client import Counter, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 from agents.graph import graph
 from agents.quiz import Kind, quiz_graph
-from engine.rag import CALLBACKS, DATA
+from engine.rag import CALLBACKS, DATA, ROOT
 from worker.tasks import add_module, app as celery
 
 MAX_PDF_MB = 50
 
+
+def access(*roles):
+    """Only lets a request through if its X-Access-Code header matches one of these roles' codes in .env."""
+    def check(x_access_code: str = Header("")):
+        codes = [os.getenv(f"{role.upper()}_CODE", "") for role in roles]
+        if not any(codes):
+            raise HTTPException(503, "Access codes are not set in .env.")  # fail closed: no code set = nobody gets in
+        if not any(c and hmac.compare_digest(x_access_code.encode(), c.encode()) for c in codes):
+            raise HTTPException(401, "Wrong or missing access code.")
+    return Depends(check)
+
+
+TEACHER = access("teacher")
+ANYONE = access("teacher", "student")
+
 app = FastAPI(title="Grisz")
+Instrumentator().instrument(app).expose(app)  # request counts and timings at /metrics, for Prometheus
+ROUTES = Counter("grisz_ask_routes", "Questions by router decision", ["route"])
+QUIZ_TRIES = Histogram("grisz_quiz_tries", "Writer attempts per quiz (1 = right first time)", buckets=[1, 2, 3])
 
 
 class Question(BaseModel):
@@ -34,13 +57,14 @@ def thread(quiz_id):
     return {"configurable": {"thread_id": quiz_id}, "callbacks": CALLBACKS}
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[ANYONE])
 def ask(q: Question):
     result = graph.invoke({"question": q.question}, {"callbacks": CALLBACKS})
+    ROUTES.labels(result["route"]).inc()
     return {"route": result["route"], "answer": result["answer"], "sources": result["sources"]}
 
 
-@app.post("/modules")
+@app.post("/modules", dependencies=[TEACHER])
 def upload_module(file: UploadFile):
     """Teacher: upload a PDF. A background worker reads and indexes it; check progress at /jobs/{id}."""
     name = (file.filename or "").replace("\\", "/").split("/")[-1]  # drop any folder part of the name
@@ -55,22 +79,23 @@ def upload_module(file: UploadFile):
     return {"job": add_module.delay(str(path)).id, "file": name}
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", dependencies=[TEACHER])
 def job_status(job_id: str):
     """PENDING (still working, or unknown id), SUCCESS (with page count) or FAILURE."""
     job = AsyncResult(job_id, app=celery)
     return {"job": job_id, "state": job.state, "result": job.result if job.successful() else None}
 
 
-@app.post("/quiz")
+@app.post("/quiz", dependencies=[TEACHER])
 def make_quiz(r: QuizRequest):
     """Teacher: generate a quiz. It waits for review; problems lists anything the checker couldn't fix."""
     quiz_id = uuid4().hex
     s = quiz_graph.invoke(r.model_dump(), thread(quiz_id))
+    QUIZ_TRIES.observe(s["tries"])
     return {"id": quiz_id, "status": "pending", "quiz": s["quiz"], "problems": s["problems"]}
 
 
-@app.post("/quiz/{quiz_id}/review")
+@app.post("/quiz/{quiz_id}/review", dependencies=[TEACHER])
 def review(quiz_id: str, d: Decision):
     """Teacher: approve or reject a pending quiz."""
     snap = quiz_graph.get_state(thread(quiz_id))
@@ -82,7 +107,7 @@ def review(quiz_id: str, d: Decision):
     return {"id": quiz_id, "status": s["status"]}
 
 
-@app.get("/quiz/{quiz_id}")
+@app.get("/quiz/{quiz_id}", dependencies=[ANYONE])
 def get_quiz(quiz_id: str):
     """Student: the quiz appears only after a teacher approves it."""
     s = quiz_graph.get_state(thread(quiz_id)).values
@@ -90,3 +115,7 @@ def get_quiz(quiz_id: str):
         raise HTTPException(404, "No quiz with that id.")
     status = s.get("status", "pending")
     return {"id": quiz_id, "status": status, "quiz": s["quiz"] if status == "approved" else None}
+
+
+# The simple test page at http://127.0.0.1:8000/ (added last, so the API routes above win)
+app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="page")
