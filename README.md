@@ -1,0 +1,44 @@
+# Grisz 🐻
+
+A multi-agent study assistant. Upload course modules (PDFs) and Grisz, a blunt, roasting study bear:
+
+- answers questions across all modules **with page citations**
+- refuses off-topic questions (course codes, grades, contact info)
+- writes quizzes, **checks them for mistakes and rewrites bad ones**, then waits for **teacher approval** before students see them
+
+## Stack
+LlamaIndex (PDF reading, retrieval, citations) · LangGraph (router, quiz → checker retry loop, human-in-the-loop) · LangChain (prompts, structured output) · FastAPI · Celery + Redis (background PDF indexing) · Chroma · Docker Compose · GitHub Actions · Groq (LLM) · fastembed (local embeddings)
+
+```
+POST /ask ──→ router ─(lesson)→ Q&A agent ──→ cited answer
+                     └(off_topic)→ refusal
+POST /quiz ─→ retrieve → write → check ─(problems)→ write (max 2 retries)
+                                      └(ok)→ teacher approval ⏸
+POST /modules ─→ Redis ─→ Celery worker ─→ Chroma
+```
+
+## Run it
+Needs Docker Desktop and a free [Groq](https://console.groq.com) API key.
+```bash
+cp .env.example .env    # add your GROQ_API_KEY
+mkdir data              # put PDF modules here, or upload them via POST /modules
+docker compose up --build
+```
+Open http://127.0.0.1:8000/docs.
+
+| Endpoint | Who | What |
+|---|---|---|
+| `POST /ask` | student | cited answer, or a refusal if off-topic |
+| `POST /modules` | teacher | upload a PDF; indexed in the background |
+| `GET /jobs/{id}` | teacher | upload progress |
+| `POST /quiz` | teacher | generate and check a quiz (mc, tf, fill, id, matching, mixed) |
+| `POST /quiz/{id}/review` | teacher | approve or reject |
+| `GET /quiz/{id}` | student | the quiz, once approved |
+
+⚠️ No user accounts yet: anyone who can reach the API can approve quizzes. Run it locally only.
+
+## Test content
+Developed with *Introduction to Python Programming* (OpenStax) and *AI for Teachers: an Open Textbook* (de la Higuera & Iyer), both CC BY 4.0. Module PDFs are not included in this repo.
+
+## Licence
+MIT, see [LICENSE](LICENSE).

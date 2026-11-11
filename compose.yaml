@@ -1,0 +1,30 @@
+services:
+  api:
+    build: .
+    image: grisz
+    ports: ["127.0.0.1:8000:8000"]  # only your PC can reach it
+    env_file: .env                   # your key stays on your PC, never inside the image
+    environment: &env
+      CHROMA_HOST: chroma            # use the shared Chroma server, not files
+      REDIS_URL: redis://redis:6379/0
+    volumes: &files
+      - ./data:/app/data             # your PDFs
+      - ./storage:/app/storage       # model, quizzes
+    depends_on: [redis, chroma]
+
+  worker:                            # reads uploaded PDFs in the background
+    build: .
+    image: grisz
+    command: celery -A worker.tasks worker --loglevel=info --concurrency=1
+    env_file: .env
+    environment: *env
+    volumes: *files
+    depends_on: [redis, chroma, api]
+
+  redis:                             # job queue between api and worker
+    image: redis:8.2-alpine
+
+  chroma:                            # the index, shared by api and worker
+    image: chromadb/chroma:1.5.9
+    volumes:
+      - ./storage/chroma-server:/data

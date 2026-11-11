@@ -1,0 +1,7 @@
+.venv
+.env
+data
+storage
+**/__pycache__
+*.ipynb
+.git

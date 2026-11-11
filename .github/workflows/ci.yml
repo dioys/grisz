@@ -1,0 +1,13 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the Docker image (installs every package in requirements.txt)
+        run: docker build -t grisz .
+      - name: Check the Python code compiles
+        run: docker run --rm grisz python -m compileall -q engine agents api worker
