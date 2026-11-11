@@ -1,0 +1,16 @@
+# Production front door: HTTPS (free certificate, automatic) in front of the API.
+{$DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 55MB
+	}
+	@hidden path /metrics /metrics/*
+	respond @hidden 404
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	reverse_proxy api:8000
+}

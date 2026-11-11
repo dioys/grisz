@@ -11,6 +11,8 @@
   input, select, button { font: inherit; padding: 6px 10px; }
   input[type=text] { width: 100%; box-sizing: border-box; }
   button { margin-top: 10px; cursor: pointer; }
+  .idbox { font-size: 1.15em; background: #fff3c4; border: 2px solid #c9a227; border-radius: 6px; padding: 10px; }
+  .idbox strong { font-family: monospace; user-select: all; }
   .out { white-space: pre-wrap; background: #f4f4f4; padding: 12px; border-radius: 6px; margin-top: 12px; }
   fieldset { margin: 12px 0; border-radius: 6px; }
   fieldset label { display: inline; font-weight: normal; }
@@ -63,6 +65,7 @@
     <input id="n" type="number" min="1" max="20" value="5">
     <button>Make quiz</button>
   </form>
+  <p id="id-box" class="idbox" hidden>Quiz id: <strong id="id-text"></strong> <button id="copy-id" type="button">Copy id</button> <span id="copied"></span></p>
   <div id="quiz-out" class="out" hidden></div>
   <p id="review" hidden><button id="approve" type="button">Approve</button> <button id="reject" type="button">Reject</button></p>
 </section>
@@ -136,12 +139,17 @@ let quizId = null;
 $("quiz-form").onsubmit = async (e) => {
   e.preventDefault();
   $("review").hidden = true;
+  $("id-box").hidden = true;
   show("quiz-out", "Writing and checking the quiz…");
   try {
     const r = await call("/quiz", post({ topic: $("topic").value, kind: $("kind").value, n: Number($("n").value) }));
     quizId = r.id;
     const problems = r.problems.length ? "\n\nProblems the checker couldn't fix:\n- " + r.problems.join("\n- ") : "";
-    show("quiz-out", `Quiz id: ${r.id}\n\n${quizText(r.quiz)}${problems}`);
+    $("id-text").textContent = r.id;
+    $("copied").textContent = "";
+    $("id-box").hidden = false;
+    $("quiz-id").value = r.id;  // also filled in under "Take a quiz"
+    show("quiz-out", `${quizText(r.quiz)}${problems}`);
     $("review").hidden = false;
   } catch (err) { show("quiz-out", "Error: " + err.message); }
 };
@@ -150,9 +158,13 @@ async function review(approve) {
   try {
     const r = await call(`/quiz/${quizId}/review`, post({ approve }));
     $("review").hidden = true;
-    show("quiz-out", $("quiz-out").textContent + `\n\nStatus: ${r.status}.` + (approve ? ` Give students this id: ${quizId}` : ""));
+    show("quiz-out", $("quiz-out").textContent + `\n\nStatus: ${r.status}.` + (approve ? " Give students the quiz id above." : ""));
   } catch (err) { show("quiz-out", $("quiz-out").textContent + "\n\nError: " + err.message); }
 }
+$("copy-id").onclick = async () => {
+  try { await navigator.clipboard.writeText(quizId); $("copied").textContent = "Copied"; }
+  catch { $("copied").textContent = "Select the id and press Ctrl+C"; }
+};
 $("approve").onclick = () => review(true);
 $("reject").onclick = () => review(false);
 

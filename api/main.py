@@ -1,10 +1,13 @@
 """Grisz's HTTP API. Run: uvicorn api.main:app --reload, then open http://127.0.0.1:8000/docs"""
 import hmac
 import os
+import time
+from collections import defaultdict, deque
 from uuid import uuid4
 
 from celery.result import AsyncResult
-from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
 from prometheus_client import Counter, Histogram
@@ -35,6 +38,22 @@ ANYONE = access("teacher", "student")
 
 app = FastAPI(title="Grisz")
 Instrumentator().instrument(app).expose(app)  # request counts and timings at /metrics, for Prometheus
+
+RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+recent = defaultdict(deque)  # IP address -> times of its recent requests
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    """Each IP gets RATE_LIMIT requests a minute: protects the Groq quota and slows down code guessing."""
+    if request.url.path.startswith(("/ask", "/quiz", "/modules")):  # /jobs is left out: the page checks it every 3 s
+        now, hits = time.monotonic(), recent[request.client.host if request.client else "?"]
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= RATE_LIMIT:
+            return JSONResponse({"detail": "Too many requests. Wait a minute."}, status_code=429)
+        hits.append(now)
+    return await call_next(request)
 ROUTES = Counter("grisz_ask_routes", "Questions by router decision", ["route"])
 QUIZ_TRIES = Histogram("grisz_quiz_tries", "Writer attempts per quiz (1 = right first time)", buckets=[1, 2, 3])
 
