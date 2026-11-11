@@ -94,6 +94,8 @@ const el = (tag, text, parent) => {
   return e;
 };
 const TYPES = { tf: "True or false", mc: "Multiple choice", id: "Identification", fill: "Fill in the blank" };
+const STATUS = { writing: "Grisz is writing it", review: "Ready for your review", published: "Open: students can take it",
+                 closed: "Closed", failed: "Grisz couldn't finish writing it" };
 let password = "";
 
 async function call(url, opts = {}) {
@@ -169,7 +171,7 @@ function examRow(x) {
   const name = el("td", "", tr);
   el("strong", x.title, name);
   el("div", `${x.pdf} · ` + Object.entries(x.mix).filter(([, n]) => n).map(([t, n]) => `${n} ${TYPES[t]}`).join(", "), name);
-  el("td", x.status + (x.status === "writing" ? ` (${x.progress || "starting"})` : ""), tr);
+  el("td", STATUS[x.status] + (x.status === "writing" ? ` (${x.progress || "starting"})` : ""), tr);
   const code = el("td", "", tr);
   if (x.code) { const c = el("span", x.code, code); c.className = "code"; if (x.status !== "published") el("div", "(closed)", code); }
   el("td", x.submissions, tr);
@@ -179,7 +181,7 @@ function examRow(x) {
   if (["review", "closed"].includes(x.status)) btn("Publish", () => act_(`/teacher/exams/${x.id}/publish`, "POST"));
   if (x.status === "published") btn("Close", () => act_(`/teacher/exams/${x.id}/close`, "POST"));
   if (x.submissions) btn("Results", () => showResults(x.id));
-  if (x.status === "failed") btn("Why it failed", () => showReview(x.id));
+  if (x.status === "failed") btn("Why", () => showReview(x.id));
   const del = btn("Delete", () => {
     if (del.dataset.sure) return act_(`/teacher/exams/${x.id}`, "DELETE");
     del.dataset.sure = "1"; del.textContent = "Click again to delete (results too)";

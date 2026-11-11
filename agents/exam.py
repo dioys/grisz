@@ -1,6 +1,8 @@
 """Exam agent: writes an exam from one lesson PDF in batches of up to 10 questions.
 Each batch: Writer → Checker (code checks, then an AI fact-check) → up to 2 retries. Also grades typed answers."""
+import json
 import os
+import re
 from typing import Literal, TypedDict
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -51,7 +53,9 @@ llm = ChatGroq(model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), max_retries
 
 writer = ChatPromptTemplate.from_messages([
     ("system", "You are Grisz, a blunt, sarcastic study bear, writing exam questions for adult students from the lesson text below. "
-               "Use only facts from it, and never ask about course codes, semesters, grading or anyone's contact info.\n"
+               "Use only facts from it, and never ask about course codes, semesters, grading or anyone's contact info. "
+               "Ask about what the lesson teaches, never about the book itself: not its title, authors, publisher, licence, "
+               "ISBN, copyright, partners, table of contents or index.\n"
                "Types: tf = a statement whose answer is True or False; mc = exactly 4 different choices and the answer copied "
                "exactly from them, with 'wrong' explaining each wrong choice; id = identification, the answer is a short term "
                "(1 to 4 words); fill = the question has one ___ blank and the answer is the missing word or short phrase.\n"
@@ -59,11 +63,12 @@ writer = ChatPromptTemplate.from_messages([
                "'hint' doesn't give the answer away. 'page' is the label of the text the answer comes from, like 'file.pdf, p. 12'. "
                "No two questions about the same fact.\n\nLesson text:\n{context}"),
     ("human", "Write exactly {n} questions of type {kind}.{feedback}"),
-]) | llm.with_structured_output(Batch, method="json_schema")
+]) | llm.with_structured_output(Batch, method="json_schema", include_raw=True)  # raw kept so we can repair it
 
 checker = ChatPromptTemplate.from_messages([
     ("system", "You check exam questions against the lesson text below. List every question whose answer is wrong, "
-               "not supported by the text, or ambiguous, as 'Q<number>: <what is wrong>'. "
+               "not supported by the text, ambiguous, or about the book itself instead of the lesson (title, authors, "
+               "publisher, licence, ISBN, table of contents), as 'Q<number>: <what is wrong>'. "
                "Return an empty list if all are correct.\n\nLesson text:\n{context}"),
     ("human", "{batch}"),
 ]) | llm.with_structured_output(Review, method="json_schema")
@@ -95,8 +100,24 @@ def write(s):
     feedback = "".join(f"\n- {p}" for p in s["problems"])
     if feedback:
         feedback = "\nYour last attempt had these problems. Fix them all:" + feedback
-    batch = writer.invoke({**s, "feedback": feedback})
+    try:
+        out = writer.invoke({**s, "feedback": feedback})
+        batch = out["parsed"] or repair(out["raw"].content)
+    except Exception:  # e.g. Groq rejected a malformed reply: an empty batch makes the checker ask for a rewrite
+        batch = Batch(items=[])
     return {"batch": batch.model_dump(), "tries": s["tries"] + 1}
+
+
+def repair(text):
+    """The model sometimes wraps its list, e.g. {"items": {"items": [...]}}. Unwrap it; if that fails, return an
+    empty batch, which the checker reports as a problem so the batch is written again."""
+    try:
+        data = json.loads(text)
+        while isinstance(data.get("items"), dict):
+            data = data["items"]
+        return Batch(items=data["items"])
+    except Exception:
+        return Batch(items=[])
 
 
 def check(s):
@@ -120,12 +141,20 @@ def plan_batches(mix):
     return [(kind, min(BATCH, mix.get(kind, 0) - i)) for kind in TYPES for i in range(0, mix.get(kind, 0), BATCH)]
 
 
+BOOK_INFO = re.compile(r"ISBN|Creative Commons|All rights reserved|Library of Congress", re.I)
+
+
 def split_text(chunks, k, limit=6000):
-    """Split a PDF's chunks (in page order) into k parts, one per batch, so questions cover the whole PDF."""
+    """Split a PDF's chunks (in page order) into k parts, one per batch, and pick chunks spread across each part
+    (up to `limit` characters), so the questions cover the whole PDF, not just the first pages of each part.
+    Copyright and licence pages are skipped."""
+    chunks = [c for c in chunks if not BOOK_INFO.search(c)] or chunks
     parts = []
     for b in range(k):
         part = chunks[b * len(chunks) // k:(b + 1) * len(chunks) // k] or [chunks[b % len(chunks)]]
-        parts.append("\n\n".join(part)[:limit])
+        take = max(1, min(len(part), int(limit // max(1, sum(map(len, part)) / len(part)))))
+        picked = [part[round(i * (len(part) - 1) / (take - 1))] for i in range(take)] if take > 1 else [part[len(part) // 2]]
+        parts.append("\n\n".join(dict.fromkeys(picked))[:limit])
     return parts
 
 
